@@ -1,2 +1,3 @@
 [build]
   dockerfile = "cmd/ntw-web/Dockerfile"
+  context = "."
