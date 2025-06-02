@@ -8,6 +8,7 @@ import (
     "os"
     "path"
     "strconv"
+    "strings"
 
     "github.com/gorilla/mux"
     ntw "moul.io/number-to-words"
@@ -43,55 +44,133 @@ func main() {
 func server(c *cli.Context) error {
     r := mux.NewRouter()
 
-    // Новий JSON endpoint
+    // Новий універсальний endpoint /api
     r.HandleFunc("/api", func(w http.ResponseWriter, r *http.Request) {
         w.Header().Set("Content-Type", "application/json")
-        // Для POST запитів з JSON body
+
+        // ==== POST ====
         if r.Method == "POST" {
-            type Req struct {
-                Language string `json:"language"`
-                Number   int    `json:"number"`
+            // Підтримка:
+            // { "language": "uk-ua", "number": 123 }
+            // { "languages": ["uk-ua","en-us"], "numbers": [123,456] }
+            // { "language": "uk-ua", "numbers": [123,456] }
+            // { "languages": ["uk-ua","en-us"], "number": 123 }
+
+            var data struct {
+                Language  string   `json:"language"`
+                Languages []string `json:"languages"`
+                Number    *int     `json:"number"`
+                Numbers   []int    `json:"numbers"`
             }
-            type Resp struct {
-                Words string `json:"words"`
-            }
-            var req Req
-            if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+
+            if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
                 w.WriteHeader(http.StatusBadRequest)
                 json.NewEncoder(w).Encode(map[string]string{"error": "invalid json"})
                 return
             }
-            language := ntw.Languages.Lookup(req.Language)
-            if language == nil {
-                w.WriteHeader(http.StatusNotFound)
-                json.NewEncoder(w).Encode(map[string]string{"error": "language not found"})
+
+            // Готуємо масив мов
+            languages := data.Languages
+            if data.Language != "" {
+                languages = append(languages, data.Language)
+            }
+            if len(languages) == 0 {
+                w.WriteHeader(http.StatusBadRequest)
+                json.NewEncoder(w).Encode(map[string]string{"error": "no language specified"})
                 return
             }
-            output := language.IntegerToWords(req.Number)
-            json.NewEncoder(w).Encode(Resp{Words: output})
+
+            // Готуємо масив чисел
+            numbers := data.Numbers
+            if data.Number != nil {
+                numbers = append(numbers, *data.Number)
+            }
+            if len(numbers) == 0 {
+                w.WriteHeader(http.StatusBadRequest)
+                json.NewEncoder(w).Encode(map[string]string{"error": "no number specified"})
+                return
+            }
+
+            // Повертаємо words[mova][number]
+            result := map[string]map[string]string{}
+            for _, lang := range languages {
+                language := ntw.Languages.Lookup(lang)
+                if language == nil {
+                    result[lang] = map[string]string{"error": "language not found"}
+                    continue
+                }
+                sub := map[string]string{}
+                for _, n := range numbers {
+                    sub[strconv.Itoa(n)] = language.IntegerToWords(n)
+                }
+                result[lang] = sub
+            }
+            json.NewEncoder(w).Encode(result)
             return
         }
 
-        // Для GET-запитів з query параметрами
-        lang := r.URL.Query().Get("language")
-        numberStr := r.URL.Query().Get("number")
-        number, err := strconv.Atoi(numberStr)
-        if err != nil || lang == "" {
+        // ==== GET ====
+        // ?language=uk-ua&language=en-us&number=123&number=456
+        // або ?languages=uk-ua,en-us&numbers=123,456
+
+        var languages []string
+        if qs := r.URL.Query()["language"]; len(qs) > 0 {
+            languages = append(languages, qs...)
+        }
+        if qs := r.URL.Query()["languages"]; len(qs) > 0 {
+            for _, s := range qs {
+                languages = append(languages, strings.Split(s, ",")...)
+            }
+        }
+
+        var numbers []int
+        if qs := r.URL.Query()["number"]; len(qs) > 0 {
+            for _, s := range qs {
+                n, err := strconv.Atoi(s)
+                if err == nil {
+                    numbers = append(numbers, n)
+                }
+            }
+        }
+        if qs := r.URL.Query()["numbers"]; len(qs) > 0 {
+            for _, s := range qs {
+                for _, ns := range strings.Split(s, ",") {
+                    n, err := strconv.Atoi(ns)
+                    if err == nil {
+                        numbers = append(numbers, n)
+                    }
+                }
+            }
+        }
+
+        if len(languages) == 0 {
             w.WriteHeader(http.StatusBadRequest)
-            json.NewEncoder(w).Encode(map[string]string{"error": "invalid parameters"})
+            json.NewEncoder(w).Encode(map[string]string{"error": "no language specified"})
             return
         }
-        language := ntw.Languages.Lookup(lang)
-        if language == nil {
-            w.WriteHeader(http.StatusNotFound)
-            json.NewEncoder(w).Encode(map[string]string{"error": "language not found"})
+        if len(numbers) == 0 {
+            w.WriteHeader(http.StatusBadRequest)
+            json.NewEncoder(w).Encode(map[string]string{"error": "no number specified"})
             return
         }
-        output := language.IntegerToWords(number)
-        json.NewEncoder(w).Encode(map[string]string{"words": output})
+
+        result := map[string]map[string]string{}
+        for _, lang := range languages {
+            language := ntw.Languages.Lookup(lang)
+            if language == nil {
+                result[lang] = map[string]string{"error": "language not found"}
+                continue
+            }
+            sub := map[string]string{}
+            for _, n := range numbers {
+                sub[strconv.Itoa(n)] = language.IntegerToWords(n)
+            }
+            result[lang] = sub
+        }
+        json.NewEncoder(w).Encode(result)
     }).Methods("GET", "POST")
 
-    // Старий endpoint для сумісності
+    // Старий endpoint
     r.HandleFunc("/{lang}/{number}", func(w http.ResponseWriter, r *http.Request) {
         vars := mux.Vars(r)
 
